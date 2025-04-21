@@ -3,7 +3,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const fs = require('fs');
 const path = require('path');
-const basicAuth = require('basic-auth'); // Added for easier Basic Auth parsing
+const basicAuth = require('basic-auth'); // Used only for webhook auth now
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -22,7 +22,7 @@ const TIERS = {
 
 // Middleware
 app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true })); // Added for form-urlencoded data
+app.use(bodyParser.urlencoded({ extended: true }));
 
 // Database file path
 const DB_PATH = path.join(__dirname, 'subscribers.json');
@@ -39,7 +39,6 @@ function readDatabase() {
     return JSON.parse(data);
   } catch (error) {
     console.error("Error reading database:", error);
-    // Return a default structure if reading fails
     return { subscribers: [] };
   }
 }
@@ -57,20 +56,14 @@ function writeDatabase(data) {
 // Apply this middleware ONLY to the /kofi-webhook route
 app.use('/kofi-webhook', (req, res, next) => {
   const credentials = basicAuth(req);
-
-  // Define the required username and password
   const requiredUsername = 'admin';
-  const requiredPassword = 'jenn'; // As requested
+  const requiredPassword = 'jenn';
 
-  // Check if credentials were provided and match
   if (!credentials || credentials.name !== requiredUsername || credentials.pass !== requiredPassword) {
-    console.warn('Webhook authentication failed for IP:', req.ip); // Log failed attempt
+    console.warn('Webhook authentication failed for IP:', req.ip);
     res.set('WWW-Authenticate', 'Basic realm="Ko-fi Webhook"');
-    // Send 401 Unauthorized but with a generic message to avoid leaking info
     return res.status(401).send('Authentication Required');
   }
-
-  // Credentials are valid, proceed to the next handler
   console.log('Webhook authentication successful');
   next();
 });
@@ -79,11 +72,9 @@ app.use('/kofi-webhook', (req, res, next) => {
 // Ko-fi webhook endpoint
 app.post('/kofi-webhook', (req, res) => {
   try {
-    // Ko-fi sends data as application/x-www-form-urlencoded with a 'data' field
-    // Need to handle cases where req.body.data might not exist or be valid JSON
     if (!req.body || !req.body.data) {
         console.log('Received empty or invalid webhook payload');
-        return res.status(200).send('Invalid payload'); // Return 200 to prevent retries
+        return res.status(200).send('Invalid payload');
     }
 
     let kofiData;
@@ -92,106 +83,73 @@ app.post('/kofi-webhook', (req, res) => {
     } catch (parseError) {
       console.error('Error parsing webhook JSON:', parseError);
       console.error('Raw data:', req.body.data);
-      return res.status(200).send('Invalid JSON data'); // Return 200
+      return res.status(200).send('Invalid JSON data');
     }
 
     console.log('Received webhook:', kofiData);
 
-    // Verify webhook is from Ko-fi
     if (kofiData.verification_token !== KOFI_VERIFICATION_TOKEN) {
       console.log('Invalid verification token received:', kofiData.verification_token);
-      return res.status(200).send('Invalid verification token'); // Still return 200
+      return res.status(200).send('Invalid verification token');
     }
 
-    // Check if it's a subscription event
-    // Also check for 'Donation' or other types if needed in the future
     if (kofiData.type === 'Subscription') {
       const db = readDatabase();
-
-      // Find existing subscriber by email (more reliable than transaction ID for updates)
       let subscriber = db.subscribers.find(s => s.email === kofiData.email);
 
       if (subscriber) {
-        // Update existing subscriber
-        subscriber.active = true; // Assume any subscription event means they are active? Check Ko-fi docs if cancellation events exist
+        subscriber.active = true;
         subscriber.last_payment = kofiData.timestamp || new Date().toISOString();
-        subscriber.tier = kofiData.tier_name || subscriber.tier; // Update tier
+        subscriber.tier = kofiData.tier_name || subscriber.tier;
         subscriber.amount = kofiData.amount || subscriber.amount;
         subscriber.currency = kofiData.currency || subscriber.currency;
-        subscriber.name = kofiData.from_name || subscriber.name; // Update name just in case
+        subscriber.name = kofiData.from_name || subscriber.name;
         console.log(`Subscription updated: ${subscriber.name} to tier ${subscriber.tier}`);
-
       } else {
-        // Add new subscriber
         const newSubscriber = {
-          // Using email as a unique ID internally might be better if kofi_transaction_id changes
-          kofi_transaction_id: kofiData.kofi_transaction_id, // Still store it
+          kofi_transaction_id: kofiData.kofi_transaction_id,
           email: kofiData.email,
           name: kofiData.from_name,
-          tier: kofiData.tier_name || 'Unknown Tier', // Provide a default
+          tier: kofiData.tier_name || 'Unknown Tier',
           amount: kofiData.amount,
           currency: kofiData.currency,
           subscribed_at: kofiData.timestamp || new Date().toISOString(),
-          last_payment: kofiData.timestamp || new Date().toISOString(), // Set initial last_payment
+          last_payment: kofiData.timestamp || new Date().toISOString(),
           active: true
         };
         db.subscribers.push(newSubscriber);
         console.log(`New subscriber: ${newSubscriber.name} at tier ${newSubscriber.tier}`);
       }
-
       writeDatabase(db);
     } else {
       console.log(`Received non-subscription event type: ${kofiData.type}`);
     }
-
-    // Always return 200 to acknowledge receipt
     res.status(200).send('Webhook received');
   } catch (error) {
     console.error('Error processing webhook:', error);
-    // Still return 200 so Ko-fi doesn't retry
     res.status(200).send('Error logged');
   }
 });
 
-// Simple dashboard (password protected using Basic Auth)
-// Helper function for dashboard authentication
-const dashboardAuth = (req, res, next) => {
-  const credentials = basicAuth(req);
-  // Use environment variable for dashboard password, fallback to 'admin'
-  const requiredPassword = process.env.DASHBOARD_PASSWORD || 'admin';
-  // For dashboard, let's assume username is 'admin' unless specified otherwise
-  const requiredUsername = process.env.DASHBOARD_USERNAME || 'admin';
+// Simple dashboard (NO password protection anymore)
+// REMOVED dashboardAuth helper function as it's no longer needed
 
-  if (!credentials || credentials.name !== requiredUsername || credentials.pass !== requiredPassword) {
-    res.set('WWW-Authenticate', 'Basic realm="Subscriber Dashboard"');
-    return res.status(401).send('Authentication required');
-  }
-  next();
-};
-
-app.get('/dashboard', dashboardAuth, (req, res) => { // Apply the auth middleware here
+// Apply the dashboard route WITHOUT the auth middleware
+app.get('/dashboard', (req, res) => {
   const db = readDatabase();
-
-  // --- START: Fixed Tier Counting ---
   const tierCounts = {};
-  // Initialize counts for defined tiers
-  Object.keys(TIERS).forEach(tierName => {
-    tierCounts[tierName] = 0;
-  });
-  tierCounts['Unknown Tier'] = 0; // Add a counter for subscribers with unknown tiers
-
+  Object.keys(TIERS).forEach(tierName => { tierCounts[tierName] = 0; });
+  tierCounts['Unknown Tier'] = 0;
   db.subscribers.filter(s => s.active).forEach(sub => {
     const tierName = sub.tier || 'Unknown Tier';
     if (tierCounts.hasOwnProperty(tierName)) {
       tierCounts[tierName]++;
     } else {
-      // If a tier exists in data but not in TIERS, count it separately
       if (!tierCounts['Other']) tierCounts['Other'] = 0;
       tierCounts['Other']++;
-       console.log(`Found subscriber with unexpected tier: ${tierName}`); // Log this
+      console.log(`Found subscriber with unexpected tier: ${tierName}`);
     }
   });
-  // --- END: Fixed Tier Counting ---
 
   let html = `
     <html>
@@ -211,101 +169,49 @@ app.get('/dashboard', dashboardAuth, (req, res) => { // Apply the auth middlewar
       </head>
       <body>
         <h1>Subscriber Dashboard</h1>
-
         <div class="summary">
           <h2>Summary</h2>
           <p>Total Active Subscribers: <strong>${db.subscribers.filter(s => s.active).length}</strong></p>
         </div>
-
         <div class="tier-info">
           <h2>Tier Information</h2>
           <table>
-            <thead>
-              <tr>
-                <th>Tier Name</th>
-                <th>Price</th>
-                <th>API Access</th>
-                <th>Daily Messages</th>
-                <th>Active Subscribers</th>
-              </tr>
-            </thead>
+            <thead><tr><th>Tier Name</th><th>Price</th><th>API Access</th><th>Daily Messages</th><th>Active Subscribers</th></tr></thead>
             <tbody>
   `;
 
   Object.entries(TIERS).forEach(([tierName, info]) => {
-    html += `
-      <tr>
-        <td>${tierName}</td>
-        <td>${info.price}</td>
-        <td>${info.api}</td>
-        <td>${info.messages}</td>
-        <td>${tierCounts[tierName] || 0} <span class="count-badge">${tierCounts[tierName] || 0}</span></td>
-      </tr>
-    `;
+    html += `<tr><td>${tierName}</td><td>${info.price}</td><td>${info.api}</td><td>${info.messages}</td><td>${tierCounts[tierName] || 0} <span class="count-badge">${tierCounts[tierName] || 0}</span></td></tr>`;
   });
 
-  // Add row for unknown/other tiers if any exist
-   if (tierCounts['Unknown Tier'] > 0) {
-       html += `<tr><td>Unknown Tier</td><td>N/A</td><td>N/A</td><td>N/A</td><td>${tierCounts['Unknown Tier']} <span class="count-badge">${tierCounts['Unknown Tier']}</span></td></tr>`;
-   }
-   if (tierCounts['Other'] > 0) {
-       html += `<tr><td>Other Tiers</td><td>N/A</td><td>N/A</td><td>N/A</td><td>${tierCounts['Other']} <span class="count-badge">${tierCounts['Other']}</span></td></tr>`;
-   }
-
+  if (tierCounts['Unknown Tier'] > 0) {
+    html += `<tr><td>Unknown Tier</td><td>N/A</td><td>N/A</td><td>N/A</td><td>${tierCounts['Unknown Tier']} <span class="count-badge">${tierCounts['Unknown Tier']}</span></td></tr>`;
+  }
+  if (tierCounts['Other'] > 0) {
+    html += `<tr><td>Other Tiers</td><td>N/A</td><td>N/A</td><td>N/A</td><td>${tierCounts['Other']} <span class="count-badge">${tierCounts['Other']}</span></td></tr>`;
+  }
 
   html += `
-            </tbody>
-          </table>
-        </div>
-
+            </tbody></table></div>
         <div class="subscriber-list">
           <h2>Active Subscribers</h2>
           <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Email</th>
-                <th>Tier</th>
-                <th>API Messages</th>
-                <th>Amount</th>
-                <th>Subscribed At</th>
-                <th>Last Payment</th>
-              </tr>
-            </thead>
+            <thead><tr><th>Name</th><th>Email</th><th>Tier</th><th>API Messages</th><th>Amount</th><th>Subscribed At</th><th>Last Payment</th></tr></thead>
             <tbody>
   `;
 
   db.subscribers
     .filter(s => s.active)
-    .sort((a, b) => (TIERS[a.tier]?.messages || 0) - (TIERS[b.tier]?.messages || 0)) // Sort by message count (tier level)
+    .sort((a, b) => (TIERS[a.tier]?.messages || 0) - (TIERS[b.tier]?.messages || 0))
     .forEach(subscriber => {
       const tierName = subscriber.tier || 'Unknown Tier';
       const tierInfo = TIERS[tierName] || { messages: 'N/A', api: 'N/A' };
-      // Safely format dates, handle potential invalid dates
       const subscribedAt = subscriber.subscribed_at ? new Date(subscriber.subscribed_at).toLocaleString() : 'N/A';
       const lastPayment = subscriber.last_payment ? new Date(subscriber.last_payment).toLocaleString() : 'N/A';
-
-      html += `
-        <tr>
-          <td>${subscriber.name || 'N/A'}</td>
-          <td>${subscriber.email || 'N/A'}</td>
-          <td>${tierName}</td>
-          <td>${tierInfo.messages}</td>
-          <td>${subscriber.amount || 'N/A'} ${subscriber.currency || ''}</td>
-          <td>${subscribedAt}</td>
-          <td>${lastPayment}</td>
-        </tr>
-      `;
+      html += `<tr><td>${subscriber.name || 'N/A'}</td><td>${subscriber.email || 'N/A'}</td><td>${tierName}</td><td>${tierInfo.messages}</td><td>${subscriber.amount || 'N/A'} ${subscriber.currency || ''}</td><td>${subscribedAt}</td><td>${lastPayment}</td></tr>`;
     });
 
-  html += `
-            </tbody>
-          </table>
-        </div>
-      </body>
-    </html>
-  `;
-
+  html += `</tbody></table></div></body></html>`;
   res.send(html);
 });
 
@@ -314,16 +220,15 @@ app.get('/', (req, res) => {
   res.send('Ko-fi webhook handler is running!');
 });
 
-// Basic Error Handling Middleware (add this near the end, before app.listen)
+// Basic Error Handling Middleware
 app.use((err, req, res, next) => {
   console.error("Unhandled error:", err.stack);
   res.status(500).send('Something broke!');
 });
 
-
 // Start the server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`Dashboard available at /dashboard`);
+  console.log(`Dashboard available at /dashboard (NO AUTHENTICATION)`);
   console.log(`Webhook endpoint at /kofi-webhook (requires Basic Auth)`);
 });
